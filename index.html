@@ -1,0 +1,822 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>lavanta</title>
+<meta property="og:title" content="✦ lavanta ✦">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23000'/%3E%3Ctext x='16' y='24' font-size='22' text-anchor='middle' fill='%23b49cff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #fx { mix-blend-mode: screen; pointer-events: none; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  #start {
+    position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    color: #cdb8ff; font: 15px/1.4 Consolas, 'Cascadia Mono', 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
+    letter-spacing: .35em; text-transform: lowercase; transition: opacity .9s ease;
+  }
+  #start .star { font-size: 26px; letter-spacing: 0; text-shadow: 0 0 14px #9b7fd4, 0 0 32px #6a4fb3; animation: pulse 2.4s ease-in-out infinite; }
+  #start .hint { font-size: 11px; opacity: .45; letter-spacing: .25em; }
+  #start.hide { opacity: 0; pointer-events: none; }
+  @keyframes pulse { 0%, 100% { opacity: .4; transform: scale(.9); } 50% { opacity: 1; transform: scale(1.12); } }
+  #replay {
+    position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom));
+    color: #cdb8ff; font: 13px/1 Consolas, 'Cascadia Mono', 'SF Mono', Menlo, monospace; letter-spacing: .2em;
+    padding: 10px 12px; opacity: 0; pointer-events: none; transition: opacity 1.4s ease;
+  }
+  #replay.show { opacity: .7; pointer-events: auto; }
+  #replay.show:hover { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="c" aria-hidden="true"></canvas>
+<canvas id="gl" aria-hidden="true"></canvas>
+<canvas id="fx" aria-hidden="true"></canvas>
+<button id="start" aria-label="başlat">
+  <span class="star">✦</span>
+  <span class="label">tıkla</span>
+  <span class="hint">sesi aç ♪</span>
+</button>
+<button id="replay">↻ tekrar izle</button>
+<audio id="music" src="music.m4a" preload="auto" playsinline></audio>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- test hooks: ?t=<sec> freezes on one moment, ?bench measures frame cost ----------
+  const qs = new URLSearchParams(location.search);
+  const STILL = qs.has('t') ? Math.max(0, parseFloat(qs.get('t')) || 0) : null;
+  const BENCH = qs.has('bench');
+  window.addEventListener('error', e => document.documentElement.setAttribute('data-err', String(e.message)));
+
+  // ---------- timeline (seconds, matched to the 15 s track) ----------
+  const T_OPEN0 = 0.5, T_OPEN1 = 1.7;   // eye opens
+  const T_BLINK = 2.75;                  // ~0.32 s blink
+  const T_ZOOM0 = 4.0, T_ZOOM1 = 10.6;   // dive into the pupil
+  const T_LAV = 11.0;                    // lavender starts growing
+  const T_BURST = 14.6;                  // sparkle burst when fully bloomed
+  const T_END = 15.2;                    // music over -> replay button
+
+  // ---------- glyphs & palette ----------
+  const FONT = "Consolas, 'Cascadia Mono', 'SF Mono', Menlo, 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New', monospace";
+  const RAMP = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+  const GLYPHS = Array.from(RAMP + '✦·=');
+  const GI = new Map(GLYPHS.map((ch, i) => [ch, i]));
+  const RL = RAMP.length;
+  const gid = ch => GI.get(ch);
+  const G_STAR4 = gid('✦'), G_DOT = gid('·'), G_PERIOD = gid('.'), G_PLUS = gid('+'), G_STAR = gid('*');
+  const G_DASH = gid('-'), G_EQ = gid('='), G_BAR = gid('|'), G_SLASH = gid('/'), G_BSL = gid('\\');
+  const BUD_CORE = Array.from('@8OQ0&%B').map(gid);   // the fat floret in the middle of a whorl
+  const BUD_SIDE = Array.from('oa*c').map(gid);       // small florets either side
+  const G_COLON = gid(':');
+  const STEMG = Array.from('|!lI').map(gid);
+
+  const LV = 24;
+  const SKIN = 0, SCLERA = 1, IRIS = 2, LASH = 3, WHITE = 4, GOLD = 5, LILAC = 6, STEM = 7, LAV = 8, LAV2 = 9, LEAF = 10;
+  const FAMS = [
+    k => [18 + 18 * k, 60 - 20 * k, 5 + 72 * k],   // skin: deep brown -> cream
+    k => [36, 10, 8 + 90 * k],                      // sclera
+    k => [222, 10, 3 + 62 * k],                     // black iris (charcoal greys)
+    k => [18, 30, 3 + 26 * k],                      // lashes / lid line
+    k => [230, 45, 6 + 94 * k],                     // star white
+    k => [44, 95, 5 + 72 * k],                      // gold
+    k => [268, 85, 7 + 80 * k],                     // lilac
+    k => [108, 40, 5 + 45 * k],                     // stem green
+    k => [266, 62, 7 + 72 * k],                     // lavender
+    k => [284, 55, 9 + 70 * k],                     // lavender, pinker
+    k => [120, 22, 6 + 44 * k],                     // grey-green leaf
+  ];
+  function hsl2rgb(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return [f(0), f(8), f(4)];
+  }
+  const PALETTE = [], PAL_RGB = new Float32Array(FAMS.length * LV * 3);
+  for (const f of FAMS) for (let i = 0; i < LV; i++) {
+    const [h, s, l] = f(i / (LV - 1));
+    PAL_RGB.set(hsl2rgb(h, s, l), PALETTE.length * 3);
+    PALETTE.push(`hsl(${h.toFixed(1)},${s.toFixed(1)}%,${l.toFixed(1)}%)`);
+  }
+  const col = (fam, lum) => fam * LV + (lum <= 0 ? 0 : lum >= 1 ? LV - 1 : Math.round(lum * (LV - 1)));
+
+  // ---------- math helpers ----------
+  const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+  const smoothU = u => u * u * (3 - 2 * u);
+  const smooth = (a, b, x) => smoothU(clamp01((x - a) / (b - a)));
+  const easeOut = u => 1 - (1 - u) * (1 - u) * (1 - u);
+  function hash(a, b, c) {
+    let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul((c | 0) + 0x3c6ef372, 0x9e3779b1);
+    h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h ^= h >>> 16;
+    return (h >>> 0) / 4294967296;
+  }
+  function mulberry(a) {
+    return () => {
+      a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const PERM = new Uint8Array(512);
+  {
+    const r = mulberry(1337), p = [...Array(256).keys()];
+    for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [p[i], p[j]] = [p[j], p[i]]; }
+    for (let i = 0; i < 512; i++) PERM[i] = p[i & 255];
+  }
+  function vnoise(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+    const X = xi & 255, Y = yi & 255;
+    const a = PERM[PERM[X] + Y], b = PERM[PERM[X + 1] + Y], c = PERM[PERM[X] + Y + 1], d = PERM[PERM[X + 1] + Y + 1];
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    return ((a + (b - a) * u) * (1 - v) + (c + (d - c) * u) * v) / 255;
+  }
+
+  // ---------- canvas, grid, glyph atlas ----------
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d', { alpha: false });
+  const atlas = document.createElement('canvas'), actx = atlas.getContext('2d');
+  const glowA = document.createElement('canvas'), gA = glowA.getContext('2d');
+  const glowB = document.createElement('canvas'), gB = glowB.getContext('2d');
+
+  let W = 1, H = 1, CW = 8, CH = 16, cols = 1, rows = 1, offX = 0, offY = 0, N = 1, fontPx = 14;
+  let Gbuf = new Int16Array(1), Cbuf = new Int16Array(1), cellHash = new Float32Array(1);
+  let ES = 1, halfDiag = 1;
+  let slotsX = 1, slotMax = 1, slotUsed = 0;
+  const slotMap = new Map();
+
+  function resetAtlas() {
+    actx.setTransform(1, 0, 0, 1, 0, 0);
+    actx.clearRect(0, 0, atlas.width, atlas.height);
+    actx.font = `${fontPx}px ${FONT}`;
+    actx.textAlign = 'center';
+    actx.textBaseline = 'middle';
+    slotMap.clear();
+    slotUsed = 0;
+  }
+  function slotFor(gi, ci) {
+    const key = gi * 1024 + ci;
+    let s = slotMap.get(key);
+    if (s === undefined) {
+      if (slotUsed >= slotMax) resetAtlas();
+      s = slotUsed++;
+      const sx = (s % slotsX) * CW, sy = ((s / slotsX) | 0) * CH;
+      actx.save();
+      actx.beginPath(); actx.rect(sx, sy, CW, CH); actx.clip();
+      actx.fillStyle = PALETTE[ci];
+      actx.fillText(GLYPHS[gi], sx + CW / 2, sy + CH * 0.54);
+      actx.restore();
+      slotMap.set(key, s);
+    }
+    return s;
+  }
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cssW = Math.max(1, window.innerWidth), cssH = Math.max(1, window.innerHeight);
+    W = Math.round(cssW * dpr); H = Math.round(cssH * dpr);
+    cv.width = W; cv.height = H;
+    // ~9000 cells max keeps every frame cheap on phones and laptops alike
+    const f = Math.max(9, Math.min(18, Math.sqrt(cssW * cssH / (0.66 * 9000))));
+    fontPx = f * dpr;
+    actx.font = `${fontPx}px ${FONT}`;
+    CW = Math.max(4, Math.round(actx.measureText('M').width));
+    CH = Math.max(6, Math.round(fontPx * 1.2));
+    cols = Math.max(10, Math.floor(W / CW)); rows = Math.max(10, Math.floor(H / CH));
+    offX = Math.floor((W - cols * CW) / 2); offY = Math.floor((H - rows * CH) / 2);
+    N = cols * rows;
+    Gbuf = new Int16Array(N); Cbuf = new Int16Array(N); cellHash = new Float32Array(N);
+    for (let i = 0; i < N; i++) cellHash[i] = hash(i, 91, 7);
+    ES = Math.min(W * 0.45, H * 0.72);
+    halfDiag = Math.hypot(W, H) / 2;
+    if (gl && !glSetup()) { gl = null; }
+    if (!gl) {
+      slotsX = Math.max(1, Math.floor(2048 / CW));
+      const slotsY = Math.max(1, Math.floor(2048 / CH));
+      atlas.width = slotsX * CW; atlas.height = slotsY * CH;
+      slotMax = slotsX * slotsY;
+      resetAtlas();
+    }
+    glc.style.display = gl ? '' : 'none';
+    fxc.style.display = gl ? '' : 'none';
+    document.documentElement.setAttribute('data-renderer', gl ? 'webgl' : '2d');
+    glowA.width = Math.max(1, Math.round(W / 4)); glowA.height = Math.max(1, Math.round(H / 4));
+    glowB.width = Math.max(1, Math.round(W / 16)); glowB.height = Math.max(1, Math.round(H / 16));
+    gA.imageSmoothingQuality = 'high'; gB.imageSmoothingQuality = 'high';
+    buildBouquet(); buildSparkles(); buildStars();
+  }
+
+  // ---------- cell buffer ----------
+  function putDens(i, fam, lum, dens) {
+    const gi = Math.round(clamp01(dens) * (RL - 1));
+    if (gi <= 0 || lum <= 0.02) return;
+    Gbuf[i] = gi; Cbuf[i] = col(fam, lum);
+  }
+  function put(c, r, gi, ci) {
+    if (c < 0 || r < 0 || c >= cols || r >= rows) return;
+    const i = r * cols + c; Gbuf[i] = gi; Cbuf[i] = ci;
+  }
+  function putEmpty(c, r, gi, ci) {
+    if (c < 0 || r < 0 || c >= cols || r >= rows) return;
+    const i = r * cols + c; if (Gbuf[i] >= 0) return;
+    Gbuf[i] = gi; Cbuf[i] = ci;
+  }
+  function flush() {
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < N; i++) {
+      const gi = Gbuf[i];
+      if (gi < 0) continue;
+      const s = slotFor(gi, Cbuf[i]);
+      const r = (i / cols) | 0, c = i - r * cols;
+      ctx.drawImage(atlas, (s % slotsX) * CW, ((s / slotsX) | 0) * CH, CW, CH, offX + c * CW, offY + r * CH, CW, CH);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  function bloom(amount) {
+    if (amount < 0.02) return;
+    gA.globalCompositeOperation = 'copy'; gA.drawImage(cv, 0, 0, glowA.width, glowA.height);
+    gB.globalCompositeOperation = 'copy'; gB.drawImage(glowA, 0, 0, glowB.width, glowB.height);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalAlpha = amount * 0.5; ctx.drawImage(glowA, 0, 0, W, H);
+    ctx.globalAlpha = amount * 0.8; ctx.drawImage(glowB, 0, 0, W, H);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // ---------- WebGL renderer: every glyph in one draw call (2D path above is the fallback) ----------
+  const glc = document.getElementById('gl'), fxc = document.getElementById('fx');
+  const fx = fxc.getContext('2d');
+  let gl = null, glBuf = null, glTex = null, glU = null, glData = new Float32Array(6);
+  function glInit() {
+    if (qs.has('nogl')) return null;
+    let g = null;
+    try { g = glc.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false }); } catch (e) { return null; }
+    if (!g) return null;
+    const VS = `
+      attribute vec2 aCell; attribute float aGlyph; attribute vec3 aColor;
+      uniform vec2 uRes, uCell, uOff; uniform float uPt;
+      varying float vGlyph; varying vec3 vColor;
+      void main() {
+        vec2 p = uOff + aCell * uCell + uPt * 0.5;
+        vec2 c = p / uRes * 2.0 - 1.0;
+        gl_Position = vec4(c.x, -c.y, 0.0, 1.0);
+        gl_PointSize = uPt;
+        vGlyph = aGlyph; vColor = aColor;
+      }`;
+    const FS = `
+      #ifdef GL_FRAGMENT_PRECISION_HIGH
+      precision highp float;
+      #else
+      precision mediump float;
+      #endif
+      uniform sampler2D uAtlas; uniform vec2 uCell, uAtlasSize; uniform float uPt, uAtlasCols;
+      varying float vGlyph; varying vec3 vColor;
+      void main() {
+        vec2 q = gl_PointCoord * uPt;
+        if (q.x >= uCell.x || q.y >= uCell.y) discard;
+        float gy = floor((vGlyph + 0.5) / uAtlasCols);
+        float gx = vGlyph - gy * uAtlasCols;
+        float a = texture2D(uAtlas, (vec2(gx, gy) * uCell + q) / uAtlasSize).a;
+        if (a < 0.01) discard;
+        gl_FragColor = vec4(vColor * a, a);
+      }`;
+    try {
+      const sh = (type, src) => {
+        const s = g.createShader(type); g.shaderSource(s, src); g.compileShader(s);
+        if (!g.getShaderParameter(s, g.COMPILE_STATUS)) throw new Error(g.getShaderInfoLog(s));
+        return s;
+      };
+      const p = g.createProgram();
+      g.attachShader(p, sh(g.VERTEX_SHADER, VS)); g.attachShader(p, sh(g.FRAGMENT_SHADER, FS));
+      g.linkProgram(p);
+      if (!g.getProgramParameter(p, g.LINK_STATUS)) throw new Error(g.getProgramInfoLog(p));
+      g.useProgram(p);
+      glU = {};
+      for (const n of ['uRes', 'uCell', 'uOff', 'uPt', 'uAtlas', 'uAtlasSize', 'uAtlasCols']) glU[n] = g.getUniformLocation(p, n);
+      glU.aCell = g.getAttribLocation(p, 'aCell'); glU.aGlyph = g.getAttribLocation(p, 'aGlyph'); glU.aColor = g.getAttribLocation(p, 'aColor');
+    } catch (e) { return null; }
+    glBuf = g.createBuffer();
+    glTex = g.createTexture();
+    g.enable(g.BLEND);
+    g.blendFunc(g.ONE, g.ONE_MINUS_SRC_ALPHA);
+    glc.addEventListener('webglcontextlost', ev => { ev.preventDefault(); gl = null; resize(); });
+    return g;
+  }
+  function glSetup() {
+    const pt = Math.max(CW, CH) + (Math.max(CW, CH) & 1);
+    const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE);
+    if (!range || range[1] < pt) return false;
+    glc.width = W; glc.height = H; fxc.width = W; fxc.height = H;
+    gl.viewport(0, 0, W, H);
+    // white glyph atlas, one slot per glyph; colour comes from the vertex
+    const ac = Math.max(1, Math.floor(2048 / CW));
+    atlas.width = ac * CW; atlas.height = Math.ceil(GLYPHS.length / ac) * CH;
+    actx.font = `${fontPx}px ${FONT}`; actx.textAlign = 'center'; actx.textBaseline = 'middle'; actx.fillStyle = '#fff';
+    GLYPHS.forEach((ch, i) => {
+      const sx = (i % ac) * CW, sy = Math.floor(i / ac) * CH;
+      actx.save(); actx.beginPath(); actx.rect(sx, sy, CW, CH); actx.clip();
+      actx.fillText(ch, sx + CW / 2, sy + CH * 0.54);
+      actx.restore();
+    });
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, glTex);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.uniform2f(glU.uRes, W, H); gl.uniform2f(glU.uCell, CW, CH); gl.uniform2f(glU.uOff, offX, offY);
+    gl.uniform1f(glU.uPt, pt); gl.uniform1i(glU.uAtlas, 0);
+    gl.uniform2f(glU.uAtlasSize, atlas.width, atlas.height); gl.uniform1f(glU.uAtlasCols, ac);
+    glData = new Float32Array(N * 6);
+    gl.bindBuffer(gl.ARRAY_BUFFER, glBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, glData.byteLength, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(glU.aCell); gl.vertexAttribPointer(glU.aCell, 2, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(glU.aGlyph); gl.vertexAttribPointer(glU.aGlyph, 1, gl.FLOAT, false, 24, 8);
+    gl.enableVertexAttribArray(glU.aColor); gl.vertexAttribPointer(glU.aColor, 3, gl.FLOAT, false, 24, 12);
+    return true;
+  }
+  function glFlush() {
+    const d = glData;
+    let n = 0;
+    for (let i = 0; i < N; i++) {
+      const gi = Gbuf[i];
+      if (gi < 0) continue;
+      const r = (i / cols) | 0, o = n * 6, ci = Cbuf[i] * 3;
+      d[o] = i - r * cols; d[o + 1] = r; d[o + 2] = gi;
+      d[o + 3] = PAL_RGB[ci]; d[o + 4] = PAL_RGB[ci + 1]; d[o + 5] = PAL_RGB[ci + 2];
+      n++;
+    }
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (n) { gl.bufferSubData(gl.ARRAY_BUFFER, 0, d.subarray(0, n * 6)); gl.drawArrays(gl.POINTS, 0, n); }
+  }
+  function fxBloom(amount) {
+    fx.clearRect(0, 0, W, H);
+    if (amount < 0.02) return;
+    gA.globalCompositeOperation = 'copy'; gA.drawImage(glc, 0, 0, glowA.width, glowA.height);
+    gB.globalCompositeOperation = 'copy'; gB.drawImage(glowA, 0, 0, glowB.width, glowB.height);
+    fx.globalCompositeOperation = 'lighter';
+    fx.imageSmoothingEnabled = true;
+    fx.globalAlpha = amount * 0.5; fx.drawImage(glowA, 0, 0, W, H);
+    fx.globalAlpha = amount * 0.8; fx.drawImage(glowB, 0, 0, W, H);
+    fx.globalAlpha = 1;
+    fx.globalCompositeOperation = 'source-over';
+  }
+  const render = () => (gl ? glFlush() : flush());
+  const glow = amount => (gl ? fxBloom(amount) : bloom(amount));
+
+  // ---------- eye ----------
+  const RI = 0.34;
+  const LOOK = [[0, 0, 0], [1.9, 0, 0], [2.15, -0.09, 0.01], [2.6, -0.09, 0.01], [3.2, 0.07, -0.015], [3.55, 0.07, -0.015], [3.95, 0, 0]];
+  const look = [0, 0];
+  function lookAt(t) {
+    look[0] = 0; look[1] = 0;
+    for (let i = 1; i < LOOK.length; i++) {
+      if (t < LOOK[i][0]) {
+        const a = LOOK[i - 1], b = LOOK[i];
+        if (t <= a[0]) break;
+        const u = smoothU((t - a[0]) / (b[0] - a[0]));
+        look[0] = a[1] + (b[1] - a[1]) * u; look[1] = a[2] + (b[2] - a[2]) * u;
+        break;
+      }
+    }
+    return look;
+  }
+  function apertureAt(t) {
+    let a = easeOut(clamp01((t - T_OPEN0) / (T_OPEN1 - T_OPEN0)));
+    const b = t - T_BLINK;
+    if (b > 0 && b < 0.32) {
+      const close = b < 0.11 ? b / 0.11 : b < 0.15 ? 1 : 1 - (b - 0.15) / 0.17;
+      a *= 1 - smoothU(clamp01(close));
+    }
+    return a;
+  }
+  const pupilR = t => 0.135 + 0.035 * smooth(4, 9, t);
+  function zoomAt(t) {
+    if (t <= T_ZOOM0) return 1;
+    const zEnd = 1.12 * halfDiag / (pupilR(T_ZOOM1) * ES);
+    return Math.exp(Math.log(zEnd) * smooth(T_ZOOM0, T_ZOOM1, t));
+  }
+
+  function drawEye(t, z, RP, lk) {
+    const ap = apertureAt(t);
+    const ix = lk[0], iy = lk[1];
+    const k = 1 / (ES * z);
+    const eyeA = smooth(T_OPEN0, T_OPEN1 - 0.3, t);
+    const skinA = smooth(0.6, 2.0, t);
+    const cellHE = CH * k;
+    const topA = 0.40 * ap, botA = 0.31 * ap;
+    const RP2 = RP * RP, RI2 = RI * RI;
+    const lineLen = t < T_OPEN1 + 0.2 ? easeOut(clamp01((t - 0.15) / 0.55)) : 0;
+    const cx0 = W / 2, cy0 = H / 2;
+    for (let r = 0; r < rows; r++) {
+      const y = (offY + (r + 0.5) * CH - cy0) * k;
+      const vy = (r + 0.5) / rows * 2 - 1;
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const x = (offX + (c + 0.5) * CW - cx0) * k;
+        const ax = x < 0 ? -x : x;
+        let top = 0, bot = 0, sh = 0, inside = false;
+        if (ax < 1) {
+          sh = Math.pow(1 - x * x, 0.85);
+          const tilt = 0.05 * x;
+          top = -topA * sh + tilt;
+          bot = botA * sh * (1 + 0.12 * x) + tilt;
+          inside = y > top && y < bot;
+        }
+        if (inside) {
+          if (y - top < cellHE * 0.9) continue;                                        // upper lid line: a dark gap
+          const dx = x - ix, dy = y - iy, d2 = dx * dx + dy * dy;
+          if (d2 < RP2) continue;                                                     // pupil: open to space
+          if (d2 < RI2) {
+            const c1x = dx - 0.115, c1y = dy + 0.115;
+            if (c1x * c1x + c1y * c1y < 0.0065) { putDens(i, WHITE, (1 - 0.5 * smooth(5, 8, t)) * eyeA, 1); continue; }
+            const c2x = dx + 0.10, c2y = dy - 0.09;
+            if (c2x * c2x + c2y * c2y < 0.0012) { putDens(i, WHITE, 0.7 * eyeA, 0.85); continue; }
+            const dI = Math.sqrt(d2), rad = (dI - RP) / (RI - RP), ang = Math.atan2(dy, dx);
+            const fib = 0.5 + 0.5 * Math.sin(ang * 37 + 5 * vnoise(ang * 2.5 + 20, rad * 3.5));
+            let lum = 0.22 + 0.36 * fib * (1 - 0.3 * rad) + 0.2 * Math.exp(-((rad - 0.28) * (rad - 0.28)) / 0.008);
+            if (rad < 0.06) lum *= 0.5;                                                 // crisp pupil edge
+            if (rad > 0.84) lum *= 0.35;                                                // dark limbal ring
+            lum *= 1 - 0.5 * Math.exp(-(y - top) / 0.07);                                // lid shadow
+            putDens(i, IRIS, lum * eyeA, 0.5 + 0.45 * fib);
+            continue;
+          }
+          let lum = 0.97 - 0.38 * Math.exp(-(y - top) / 0.08) - 0.32 * smooth(0.55, 1.0, ax) - 0.1 * vnoise(x * 6 + 40, y * 9);
+          lum += (cellHash[i] - 0.5) * 0.05;
+          putDens(i, SCLERA, lum * eyeA, 0.5 + 0.45 * lum);
+          continue;
+        }
+        // the thin line the eye opens from
+        if (lineLen > 0 && ax < lineLen && Math.abs(y - (top + bot) / 2) < cellHE * 0.6) {
+          Gbuf[i] = cellHash[i] < 0.5 ? G_DASH : G_EQ;
+          Cbuf[i] = col(SKIN, 0.85 - 0.45 * ax);
+          continue;
+        }
+        if (skinA <= 0.001) continue;
+        const n = vnoise(x * 2.4 + 3.1, y * 5.2 + 7.7) * 0.7 + vnoise(x * 7 + 11, y * 14 + 5) * 0.3;
+        let lum = 0.26 + 0.28 * n, dens = 0.42 + 0.5 * n;
+        if (ax < 1.25) {
+          const q = x / 1.18, sh2 = Math.pow(Math.max(0, 1 - q * q), 0.8);
+          const yc = -(0.40 * (0.55 + 0.45 * ap) + 0.15) * sh2 + 0.05 * x;            // lid crease
+          const dyc = y - yc;
+          if (sh2 > 0.05 && dyc > -0.03 && dyc < 0.025) continue;                       // crease: dark gap
+          if (dyc < 0) lum += 0.16 * Math.exp(-((dyc + 0.14) * (dyc + 0.14)) / 0.01) * sh2;   // brow bone light
+          else if (ax < 1 && y < top) lum += 0.2 * sh2;                                 // lit eyelid
+          if (ax < 1 && y < top && y > top - (0.10 * sh + 0.02) * (0.5 + 0.5 * ap)) {   // lashes as dark strokes
+            const lp = x * 17 + (top - y) * x * 3;
+            if (lp - Math.floor(lp) < 0.5) continue;
+          }
+          if (ax < 1 && y > bot && y < bot + cellHE * 1.1 + 0.01) { lum = 0.72; dens = 0.7; }   // lower lid rim
+          else if (y > bot) lum -= 0.12 * Math.exp(-(y - bot) / 0.12) * sh2;
+        }
+        const vx = (c + 0.5) / cols * 2 - 1;
+        const vig = Math.max(0, 1.15 - 0.6 * (vx * vx + vy * vy));
+        putDens(i, SKIN, lum * vig * skinA, dens * (0.6 + 0.4 * vig));
+      }
+    }
+  }
+
+  // ---------- stars (inside the pupil, then everywhere) ----------
+  let stars = new Float32Array(1);
+  function buildStars() {
+    const n = Math.round(Math.max(120, Math.min(700, N / 18)));
+    const r = mulberry(5);
+    stars = new Float32Array(n);
+    for (let i = 0; i < n; i++) stars[i] = r();
+  }
+  const travel = t => 0.025 * t + 1.6 * smooth(4.4, 11.2, t);
+  function drawStars(t, eyeOn, z, RP, lk) {
+    let A = eyeOn ? smooth(4.6, 7.8, t) : 1;
+    A *= 1 - 0.35 * smooth(11, 14, t);
+    if (A <= 0.01) return;
+    const k = 1 / (ES * z), lim = RP * 0.95, lim2 = lim * lim, ix = lk[0], iy = lk[1];
+    const tr = travel(t);
+    const masked = (c, r) => {
+      if (!eyeOn) return true;
+      const ex = (offX + (c + 0.5) * CW - W / 2) * k - ix, ey = (offY + (r + 0.5) * CH - H / 2) * k - iy;
+      return ex * ex + ey * ey < lim2;
+    };
+    const sp = (c, r, gi, ci) => { if (masked(c, r)) putEmpty(c, r, gi, ci); };
+    for (let i = 0; i < stars.length; i++) {
+      const u = stars[i] + tr, cyc = Math.floor(u), d = 1 - (u - cyc);
+      const ang = hash(i, cyc, 1) * 6.2832, rr = Math.sqrt(hash(i, cyc, 2));
+      const R = rr * 0.85 / (0.06 + 0.94 * d);
+      const px = Math.cos(ang) * R * W * 0.55, py = Math.sin(ang) * R * H * 0.55;
+      const c = Math.floor((px + W / 2 - offX) / CW), r = Math.floor((py + H / 2 - offY) / CH);
+      if (c < 0 || r < 0 || c >= cols || r >= rows) continue;
+      let b = (0.3 + 0.7 * hash(i, cyc, 3)) * (0.55 + 0.45 * (1 - d)) * clamp01((1 - d) / 0.12) * (0.8 + 0.2 * Math.sin(t * 3.1 + i));
+      b *= A;
+      if (b < 0.06) continue;
+      const fr = hash(i, cyc, 4);
+      const fam = fr < 0.14 ? LILAC : fr < 0.22 ? GOLD : WHITE;
+      const big = b > 0.55 && hash(i, cyc, 5) < 0.3;
+      const gi = big ? G_PLUS : b > 0.5 ? (fr > 0.6 ? G_STAR : G_PLUS) : b > 0.25 ? G_DOT : G_PERIOD;
+      sp(c, r, gi, col(fam, b));
+      if (big) {
+        const a1 = col(fam, b * 0.45), a2 = col(fam, b * 0.22);
+        sp(c - 1, r, G_DASH, a1); sp(c + 1, r, G_DASH, a1);
+        sp(c - 2, r, G_DASH, a2); sp(c + 2, r, G_DASH, a2);
+        sp(c, r - 1, G_BAR, a1); sp(c, r + 1, G_BAR, a1);
+      }
+    }
+  }
+
+  // ---------- lavender bouquet ----------
+  let stems = [], baseRow = 0, headPX = 0, headPY = 0, bouqR = 100;
+  function buildBouquet() {
+    const r = mulberry(7);
+    const landscape = cols * CW >= rows * CH;
+    const n = landscape ? 19 : 15;
+    const minL = landscape ? 0.52 : 0.5, varL = landscape ? 0.26 : 0.22;
+    const maxLen = rows * (minL + varL);
+    // widest possible reach = maxLen * (1.6 * (fan/2 + slope jitter) + bend) — keep it inside ~88% of the width
+    const sp = Math.min(1, (cols * 0.44) / (maxLen * 1.265));
+    const fan = 1.1 * sp;
+    baseRow = rows - Math.max(2, Math.round(rows * 0.05));
+    stems = [];
+    for (let i = 0; i < n; i++) {
+      const f = i / (n - 1) - 0.5;
+      stems.push({
+        bx: cols / 2 + (r() - 0.5) * Math.min(6, cols * 0.08),
+        slope: f * fan + (r() - 0.5) * 0.2 * sp,
+        bend: (r() - 0.5) * 0.45 * sp,
+        len: Math.floor(rows * (minL + r() * varL)),
+        delay: r() * 0.8,
+        ph: r() * 6.2832,
+        fam: r() < 0.5 ? LAV : LAV2,
+        bud: 0.6 + r() * 0.1,            // where the flower spike starts along the stem
+        id: i,
+      });
+    }
+    stems.sort((a, b) => b.len - a.len);   // long stems behind, short ones in front
+    // random lean can push the whole bunch sideways: measure the real spread, then re-centre it
+    const tipX = st => st.bx + st.slope * st.len * 1.6 + st.bend * st.len;
+    let minX = 1e9, maxX = -1e9;
+    for (const st of stems) { minX = Math.min(minX, tipX(st) - 2, st.bx); maxX = Math.max(maxX, tipX(st) + 2, st.bx); }
+    const shift = cols / 2 - (minX + maxX) / 2;
+    for (const st of stems) st.bx += shift;
+    minX += shift; maxX += shift;
+    let sx = 0, sy = 0;
+    for (const st of stems) {
+      const L = st.len * 0.8;
+      sx += st.bx + st.slope * L * 1.6 + st.bend * 0.64 * st.len;
+      sy += baseRow - L;
+    }
+    headPX = offX + (sx / stems.length + 0.5) * CW;
+    headPY = offY + (sy / stems.length + 0.5) * CH;
+    bouqR = Math.max((maxX - minX) * CW, maxLen * CH * 0.6);
+  }
+  function drawUnderlay(t, amt) {
+    if (amt <= 0.01) return;
+    const R = bouqR * 0.85;
+    const g = ctx.createRadialGradient(headPX, headPY, R * 0.05, headPX, headPY, R);
+    const a = (0.3 + 0.05 * Math.sin(t * 1.3)) * amt;
+    g.addColorStop(0, `rgba(160,120,240,${a.toFixed(3)})`);
+    g.addColorStop(0.5, `rgba(120,80,210,${(a * 0.35).toFixed(3)})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+  function drawBouquet(t) {
+    const tl = t - T_LAV;
+    if (tl <= 0) return;
+    const swayA = smooth(14, 16.5, t);
+    for (const st of stems) {
+      const gR = clamp01((tl - st.delay) / 2.3);
+      if (gR <= 0) continue;
+      const steps = Math.floor(st.len * easeOut(gR));
+      const sway = swayA * 1.4 * Math.sin(t * 0.9 + st.ph);
+      const si = st.id;
+      let px = st.bx;
+      for (let k = 0; k <= steps; k++) {
+        const s = k / st.len;
+        const x = st.bx + st.slope * k * 1.6 + st.bend * s * s * st.len + sway * s * s;
+        const row = baseRow - k, cx = Math.round(x), dx = x - px;
+        px = x;
+        const h1 = hash(si, k, 21);
+        const bl = s >= st.bud ? clamp01((tl - st.delay - 2.0 - (s - st.bud) * 2.4) / 0.9) : 0;
+        if (bl <= 0.02) {
+          const gi = Math.abs(dx) < 0.35 ? STEMG[(h1 * 4) | 0] : dx > 0 ? G_SLASH : G_BSL;
+          put(cx, row, gi, col(STEM, 0.35 + 0.3 * hash(si, k, 22)));
+          if (k > 2 && k < 11 && h1 < 0.16) {
+            const side = hash(si, k, 23) < 0.5 ? -1 : 1, lg = side < 0 ? G_BSL : G_SLASH;
+            put(cx + side, row, lg, col(LEAF, 0.55));
+            put(cx + 2 * side, row - 1, lg, col(LEAF, 0.42));
+          }
+        } else {
+          // a lavender spike: whorls of florets with thin gaps, tapering to the tip
+          const u = (s - st.bud) / (1 - st.bud);
+          const phase = (k + si) % 3;
+          const pulse = 0.05 * Math.sin(t * 2.2 + k * 0.35 + st.ph);
+          const fam = phase === 1 ? st.fam : (st.fam === LAV ? LAV2 : LAV);
+          if (phase === 0 && u < 0.85) {                                                // gap between whorls
+            put(cx, row, G_COLON, col(st.fam, 0.25 + 0.2 * bl));
+            continue;
+          }
+          let hh = hash(si, k, 31);
+          if (hash(si, k, 32) < 0.15) hh = hash(si, k, (t * 4) | 0);                    // shimmer
+          if (u > 0.92) { put(cx, row, hh < 0.5 ? G_STAR : G_PERIOD, col(fam, 0.55 + 0.35 * bl)); continue; }
+          put(cx, row, BUD_CORE[(hh * BUD_CORE.length) | 0], col(fam, 0.6 + 0.38 * bl + (hh - 0.5) * 0.15 + pulse));
+          const w = phase === 1 ? (bl > 0.35 && u < 0.8 ? 1 : 0) + (bl > 0.85 && u < 0.25 && h1 < 0.5 ? 1 : 0)
+                                : (bl > 0.6 && u < 0.55 ? 1 : 0);
+          for (let j = 1; j <= w; j++) {
+            const lum = 0.52 + 0.32 * bl - j * 0.1 + pulse;
+            put(cx - j, row, BUD_SIDE[(hash(si, k, 40 + j) * BUD_SIDE.length) | 0], col(fam, lum));
+            put(cx + j, row, BUD_SIDE[(hash(si, k, 50 + j) * BUD_SIDE.length) | 0], col(fam, lum));
+          }
+        }
+      }
+    }
+  }
+
+  // ---------- sparkles, shooting stars, burst ----------
+  let sparks = [];
+  function buildSparkles() {
+    const r = mulberry(99);
+    const n = Math.round(Math.max(70, Math.min(420, N / 40)));
+    sparks = [];
+    for (let i = 0; i < n; i++) {
+      const f = r();
+      sparks.push({
+        x: r(), y: r(), ph: r() * 6.2832, sp: 0.7 + r() * 2.3,
+        fam: f < 0.45 ? WHITE : f < 0.75 ? GOLD : LILAC,
+        rise: r() < 0.35 ? 0.012 + r() * 0.03 : 0,
+        big: r() < 0.18,
+      });
+    }
+  }
+  function drawSparkles(t, A) {
+    if (A <= 0.01) return;
+    for (const s of sparks) {
+      let a = Math.sin(t * s.sp + s.ph);
+      if (a <= 0) continue;
+      a = a * a * a * A;
+      if (a < 0.05) continue;
+      let y = s.y;
+      if (s.rise) { y = (s.y - t * s.rise) % 1; if (y < 0) y += 1; }
+      const c = Math.floor((s.x + 0.006 * Math.sin(t * 0.8 + s.ph)) * cols), r = Math.floor(y * rows);
+      const lum = 0.2 + 0.8 * a;
+      const star = s.big && a > 0.55;
+      const gi = star ? G_STAR4 : a > 0.5 ? (s.big ? G_STAR : G_PLUS) : a > 0.22 ? G_DOT : G_PERIOD;
+      putEmpty(c, r, gi, col(s.fam, lum));
+      if (star) {
+        const a1 = col(s.fam, lum * 0.45);
+        putEmpty(c - 1, r, G_DASH, a1); putEmpty(c + 1, r, G_DASH, a1);
+        putEmpty(c, r - 1, G_BAR, a1); putEmpty(c, r + 1, G_BAR, a1);
+        if (a > 0.85) {
+          const a2 = col(s.fam, lum * 0.2);
+          putEmpty(c - 2, r, G_DASH, a2); putEmpty(c + 2, r, G_DASH, a2);
+        }
+      }
+    }
+  }
+  function drawShooting(t) {
+    const T0 = 14.2, P = 3.7;
+    if (t < T0) return;
+    const n = Math.floor((t - T0) / P), u = ((t - T0) - n * P) / 1.1;
+    if (u > 1) return;
+    const dir = hash(n, 5, 1) < 0.5 ? 1 : -1;
+    const c0 = cols * (dir > 0 ? 0.08 + 0.35 * hash(n, 3, 1) : 0.57 + 0.35 * hash(n, 3, 1));
+    const r0 = rows * (0.05 + 0.25 * hash(n, 4, 1));
+    const dxc = dir * cols * 0.35, dyc = rows * 0.18;
+    const env = Math.sin(Math.PI * u);
+    const hc = c0 + dxc * u, hr = r0 + dyc * u;
+    const len = Math.hypot(dxc, dyc), ux = dxc / len, uy = dyc / len;
+    const steep = Math.abs((dyc * CH) / (dxc * CW)) > 0.35;
+    const tg = !steep ? G_DASH : (dxc > 0) === (dyc > 0) ? G_BSL : G_SLASH;
+    putEmpty(Math.round(hc), Math.round(hr), G_STAR4, col(WHITE, env));
+    for (let j = 1; j <= 11; j++) {
+      putEmpty(Math.round(hc - ux * j * 1.2), Math.round(hr - uy * j * 1.2), j < 3 ? tg : (j & 1 ? G_DOT : tg),
+        col(j < 4 ? WHITE : LILAC, env * (1 - j / 12) * 0.8));
+    }
+  }
+  function drawBurst(t) {
+    const u = (t - T_BURST) / 1.8;
+    if (u < 0 || u > 1) return;
+    const Rpx = bouqR * 0.9, grow = 1 - Math.pow(1 - u, 2.2), fade = Math.pow(1 - u, 1.3);
+    for (let i = 0; i < 70; i++) {
+      const ang = hash(i, 11, 2) * 6.2832, spd = 0.3 + 0.7 * hash(i, 12, 2);
+      const px = headPX + Math.cos(ang) * spd * grow * Rpx;
+      const py = headPY + Math.sin(ang) * spd * grow * Rpx + 0.15 * u * u * Rpx;
+      const c = Math.floor((px - offX) / CW), r = Math.floor((py - offY) / CH);
+      const hv = hash(i, 13, 2);
+      const gi = hv < 0.2 ? G_STAR4 : hv < 0.45 ? G_STAR : hv < 0.7 ? G_PLUS : G_DOT;
+      const fam = hv < 0.33 ? GOLD : hv < 0.66 ? LILAC : WHITE;
+      putEmpty(c, r, gi, col(fam, fade * (0.6 + 0.4 * hash(i, 14, 2))));
+    }
+  }
+
+  // ---------- one frame ----------
+  const PROF = BENCH ? { scene: 0, flush: 0, bloom: 0 } : null;
+  function frame(t, idle) {
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    Gbuf.fill(-1);
+    if (idle) { drawSparkles(t, 0.45); render(); glow(0.4); return; }
+    let m = PROF ? performance.now() : 0;
+    const z = zoomAt(t), RP = pupilR(t), lk = lookAt(t);
+    const eyeOn = RP * ES * z < halfDiag * 1.02;
+    if (eyeOn) drawEye(t, z, RP, lk);
+    drawStars(t, eyeOn, z, RP, lk);
+    const fin = smooth(11.6, 14.8, t);
+    if (t >= T_LAV) { drawUnderlay(t, fin); drawBouquet(t); }
+    drawSparkles(t, smooth(11.5, 14.5, t));
+    drawShooting(t);
+    drawBurst(t);
+    if (PROF) { const n = performance.now(); PROF.scene += n - m; m = n; }
+    render();
+    if (PROF) { const n = performance.now(); PROF.flush += n - m; m = n; }
+    glow(0.3 + 0.55 * fin);
+    if (PROF) { PROF.bloom += performance.now() - m; }
+  }
+
+  // ---------- playback ----------
+  const audio = document.getElementById('music');
+  const startBtn = document.getElementById('start');
+  const replayBtn = document.getElementById('replay');
+  if (window.matchMedia && matchMedia('(pointer: coarse)').matches) startBtn.querySelector('.label').textContent = 'dokun';
+
+  let started = false, t0 = 0, replayShown = false;
+  const now = () => performance.now() / 1000;
+  function playAudio() {
+    try { audio.currentTime = 0; const p = audio.play(); if (p && p.catch) p.catch(() => {}); } catch (e) { /* plays silently */ }
+  }
+  function start() {
+    if (started) return;
+    started = true;
+    startBtn.classList.add('hide');
+    const el = document.documentElement;
+    try {
+      const fs = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (fs) { const p = fs.call(el); if (p && p.catch) p.catch(() => {}); }
+    } catch (e) { /* no fullscreen on this device */ }
+    t0 = now();
+    playAudio();
+  }
+  function replay() {
+    replayBtn.classList.remove('show');
+    replayShown = false;
+    t0 = now();
+    playAudio();
+  }
+  function syncAudio(t) {
+    if (audio.paused || audio.ended || audio.currentTime <= 0 || t > 14.5) return;
+    const d = audio.currentTime - t;
+    if (Math.abs(d) > 0.2) t0 -= d;
+  }
+  startBtn.addEventListener('click', start);
+  replayBtn.addEventListener('click', replay);
+
+  function loop() {
+    if (!started) frame(now(), true);
+    else {
+      let t = now() - t0;
+      syncAudio(t);
+      t = now() - t0;
+      frame(t, false);
+      if (t > T_END && !replayShown) { replayShown = true; replayBtn.classList.add('show'); }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  let resizeQueued = false;
+  window.addEventListener('resize', () => {
+    if (resizeQueued) return;
+    resizeQueued = true;
+    requestAnimationFrame(() => { resizeQueued = false; resize(); if (STILL !== null) frame(STILL, false); });
+  });
+
+  gl = glInit();
+  resize();
+  if (BENCH) {
+    startBtn.remove();
+    const times = [];
+    const step = 20 / Math.max(1, parseInt(qs.get('bench'), 10) || 200);
+    for (let t = 0; t < 20; t += step) { const a = performance.now(); frame(t, false); times.push(performance.now() - a); }
+    times.sort((a, b) => a - b);
+    const avg = times.reduce((s, v) => s + v, 0) / times.length;
+    document.documentElement.setAttribute('data-bench',
+      `grid=${cols}x${rows} avg=${avg.toFixed(2)}ms p95=${times[Math.floor(times.length * 0.95)].toFixed(2)}ms max=${times[times.length - 1].toFixed(2)}ms` +
+      ` | per-frame scene=${(PROF.scene / times.length).toFixed(2)} flush=${(PROF.flush / times.length).toFixed(2)} bloom=${(PROF.bloom / times.length).toFixed(2)}`);
+  } else if (STILL !== null) {
+    startBtn.remove();
+    frame(STILL, false);
+  } else {
+    requestAnimationFrame(loop);
+  }
+})();
+</script>
+</body>
+</html>
